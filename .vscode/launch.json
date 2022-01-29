@@ -8,7 +8,7 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/movies_by_year",
+      "program": "${workspaceFolder}/smallsh",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${fileDirname}",
