@@ -28,11 +28,13 @@ struct command
 	char *outDirect;
 	int processId;
 	int exitStatus;
+	bool isForeground;
 };
 
 // Function prototypes
 bool isCommentOrBlank(char *);
 struct command *buildCommand(char *);
+void executeForeground(struct command *, int *);
 
 /* This program reads movie data from a csv and loads it into a linked list.
 * The user is then given multiple options to filter/display the data
@@ -40,7 +42,8 @@ struct command *buildCommand(char *);
 int main(void)
 {
 	char *HOME = getenv("HOME");
-	int exitStatus = 0;
+	int *statusCode;
+	statusCode = 0;
 	DIR *currDir = opendir(".");
 
 	// Execute main loop, maintaining shell prompting/reading
@@ -67,26 +70,57 @@ int main(void)
 		}
 		// ******************** Built-in Commands ********************
 		// Handle exit command
-		if (strncmp(buff, "exit", 4))
+		if (strncmp(buff, "exit", 4) == 0)
 		{
 			// TODO: Go through my array of child PIDs, kill them if they're running,
 			// and then reach the return EXIT_SUCCESS?
 			free(buff);
 			closedir(currDir);
-			exit(0);
+			break;
 		}
 
-		// Handle cd
+		// Handle pwd
+		if (strncmp(buff, "pwd", 3) == 0)
+		{
+			char currDirName[256];
+			char *test = getcwd(currDirName, 256);
+
+			printf("%s\n", currDirName);
+			fflush(stdout);
+			free(buff);
+			continue;
+		}
+
 		struct command *currCommand = buildCommand(buff);
+
+		// Handle cd
 		// no args -> go to dir specified in HOME env var
 		// Takes path as second arg.  Must support absolute and relative path
-		if (strncmp(buff, "cd", 2))
+		if (strncmp(buff, "cd", 2) == 0)
 		{
+			int cdError = 0;
+			char *newDir = NULL;
+			if (currCommand->numArgs == 0)
+			{
+				newDir = HOME;
+				printf("changing dir to %s\n", newDir);
+				fflush(stdout);
+				cdError = chdir(newDir);
+			}
+			else
+			{
+				newDir = currCommand->arguments[1];
+				printf("changing dir to %s\n", newDir);
+				fflush(stdout);
+				cdError = chdir(newDir);
+			}
 
-			char *newDir = currCommand->arguments[1];
-
-			printf("changing dir to %s", newDir);
-			chdir(newDir);
+			// Detect cd error
+			if (cdError != 0)
+			{
+				printf("There was an error changing to directory %s\n", newDir);
+			}
+			free(buff);
 			continue;
 		}
 
@@ -94,20 +128,20 @@ int main(void)
 		// prints either exit status or terminating signal of last foreground process ran by shell
 		// If this command is run before any foreground command is run, then it should simply return the exit status 0.
 		// The three built-in shell commands do not count as foreground processes for the purposes of this built-in command - i.e., status should ignore built-in commands.
-		else if (strncmp(buff, "status", 6))
+		if (strncmp(buff, "status", 6) == 0)
 		{
-			printf("Exit value %d\n", exitStatus);
+			printf("Exit value %d\n", *statusCode);
 			fflush(stdout);
 			continue;
 		}
 
 		// ******************** Non Built-in Commands ********************
-
-		// Check for <, >, and &
-		// last word '&' means execute command in background. '&' elsewhere -> treat like normal
-		// < and > are used for file redirection after all command args
-
-		// Expand instances of "$$" (dont need to expand other variables)
+		// Foreground command
+		if (currCommand->isForeground)
+		{
+			executeForeground(currCommand, statusCode);
+		}
+		// Background command
 
 		// **********************************************************
 		// Non-native commands
@@ -187,4 +221,39 @@ struct command *buildCommand(char *input)
 void freeCommand(struct command *oldCommand)
 {
 	// TODO: Free an old command struct
+}
+
+void executeForeground(struct command *toExecute, int *statusCode)
+{
+	int childStatus;
+	char *commName = toExecute->name;
+	char **args = toExecute->arguments;
+
+	// Fork a new process
+	pid_t spawnPid = fork();
+
+	switch (spawnPid)
+	{
+	case -1:
+		perror("fork()\n");
+		statusCode = 1;
+		exit(1);
+		break;
+	case 0:
+		// In the child process
+		printf("CHILD(%d) running ls command\n", getpid());
+		// Replace the current program with "/bin/ls"
+		execvp(commName, args);
+		// exec only returns if there is an error
+		statusCode = 1;
+		perror("execve");
+		exit(2);
+		break;
+	default:
+		// In the parent process
+		// Wait for child's termination
+		spawnPid = waitpid(spawnPid, &childStatus, 0);
+		exit(0);
+		break;
+	}
 }
