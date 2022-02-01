@@ -7,13 +7,14 @@
 //		The user can choose to load movie data from the largest file in a directory, the smallest file,
 //		or a file with the name of their choosing
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_LINE_LEN 2048
@@ -43,8 +44,7 @@ void executeForeground(struct command *, int *);
 int main(void)
 {
 	char *HOME = getenv("HOME");
-	int *statusCode;
-	statusCode = 0;
+	int statusCode = 0;
 	DIR *currDir = opendir(".");
 
 	// Execute main loop, maintaining shell prompting/reading
@@ -55,13 +55,8 @@ int main(void)
 		char *buff = NULL;
 		size_t bufflen;
 		getline(&buff, &bufflen, stdin);
-		int inputlen = strlen(buff);
 
-		// if (buff[inputlen - 1] == '\n')
-		// 	buff[inputlen - 1] = '\0';
-
-		// Ignore comment lines (beginning with '#') -> continue
-		// Ignore blank lines -> continue
+		// Ignore blank lines and commented lines
 		if (isCommentOrBlank(buff))
 		{
 			free(buff);
@@ -84,7 +79,8 @@ int main(void)
 		if (strncmp(buff, "pwd", 3) == 0)
 		{
 			char currDirName[256];
-			char *test = getcwd(currDirName, 256);
+			// TODO: REMOVE?? -> ????? char *test = getcwd(currDirName, 256);
+			getcwd(currDirName, 256);
 
 			printf("%s\n", currDirName);
 			fflush(stdout);
@@ -101,7 +97,7 @@ int main(void)
 		{
 			int cdError = 0;
 			char *newDir = NULL;
-			if (currCommand->numArgs == 0)
+			if (currCommand->numArgs == 1)
 			{
 				newDir = HOME;
 				printf("changing dir to %s\n", newDir);
@@ -141,7 +137,7 @@ int main(void)
 		// Foreground command
 		if (currCommand->isForeground)
 		{
-			executeForeground(currCommand, statusCode);
+			executeForeground(currCommand, &statusCode);
 		}
 		// Background command
 
@@ -281,10 +277,10 @@ void freeCommand(struct command *oldCommand)
 	// TODO: Free an old command struct
 }
 
-void executeForeground(struct command *toExecute, int *statusCode)
+void executeForeground(struct command *activeCommand, int *statusCode)
 {
 	int childStatus;
-	char *commName = toExecute->name;
+	char *commName = activeCommand->name;
 
 	// Fork a new process
 	pid_t spawnPid = fork();
@@ -298,11 +294,49 @@ void executeForeground(struct command *toExecute, int *statusCode)
 		break;
 	case 0:
 		// In the child process
+		// TODO: REMOVE PRINT STATEMENT
 		printf("CHILD(%d) running ls command\n", getpid());
-		// Replace the current program with "/bin/ls"
-		execvp(commName, toExecute->argv);
+
+		// Do we need to redirect input?
+		if (activeCommand->inDirect)
+		{
+			int sourceFD = open(activeCommand->inDirect, O_RDONLY);
+			if (sourceFD == -1)
+			{
+				perror("source open()");
+				exit(1);
+			}
+
+			// Redirect stdin
+			int inCode = dup2(sourceFD, 0);
+			if (inCode == -1)
+			{
+				perror("source dup2()");
+				exit(2);
+			}
+		}
+		// Do we need to redirect output?
+		if (activeCommand->outDirect)
+		{
+			int targetFD = open(activeCommand->outDirect, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if (targetFD == -1)
+			{
+				perror("target open()");
+				exit(1);
+			}
+
+			// Redirect stdout
+			int outCode = dup2(targetFD, 1);
+			if (outCode == -1)
+			{
+				perror("target dup2()");
+				exit(2);
+			}
+		}
+
+		execvp(commName, activeCommand->argv);
+
 		// exec only returns if there is an error
-		*statusCode = 1;
 		perror("execvp");
 		exit(2);
 		break;
@@ -310,6 +344,14 @@ void executeForeground(struct command *toExecute, int *statusCode)
 		// In the parent process
 		// Wait for child's termination
 		spawnPid = waitpid(spawnPid, &childStatus, 0);
+		if (WIFEXITED(childStatus))
+		{
+			*statusCode = WEXITSTATUS(childStatus);
+		}
+		else
+		{
+			*statusCode = WTERMSIG(childStatus);
+		}
 		break;
 	}
 }
