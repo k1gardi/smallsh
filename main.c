@@ -22,7 +22,7 @@
 struct command
 {
 	char *name;
-	char arguments[MAX_NUM_ARGS][256];
+	char *argv[MAX_NUM_ARGS + 1];
 	int numArgs;
 	char *inDirect;
 	char *outDirect;
@@ -56,8 +56,8 @@ int main(void)
 		getline(&buff, &bufflen, stdin);
 		int inputlen = strlen(buff);
 
-		if (buff[inputlen - 1] == '\n')
-			buff[inputlen - 1] = '\0';
+		// if (buff[inputlen - 1] == '\n')
+		// 	buff[inputlen - 1] = '\0';
 
 		// Ignore comment lines (beginning with '#') -> continue
 		// Ignore blank lines -> continue
@@ -109,7 +109,7 @@ int main(void)
 			}
 			else
 			{
-				newDir = currCommand->arguments[1];
+				newDir = currCommand->argv[1];
 				printf("changing dir to %s\n", newDir);
 				fflush(stdout);
 				cdError = chdir(newDir);
@@ -130,7 +130,7 @@ int main(void)
 		// The three built-in shell commands do not count as foreground processes for the purposes of this built-in command - i.e., status should ignore built-in commands.
 		if (strncmp(buff, "status", 6) == 0)
 		{
-			printf("Exit value %d\n", *statusCode);
+			printf("Exit value %d\n", statusCode);
 			fflush(stdout);
 			continue;
 		}
@@ -190,30 +190,34 @@ struct command *buildCommand(char *input)
 	currCommand->inDirect = NULL;
 	currCommand->outDirect = NULL;
 	currCommand->numArgs = 0;
+	currCommand->isForeground = true;
 
 	// Get command name
-	char *token = strtok_r(input, " ", &argPtr);
+	char *token = strtok_r(input, " \n", &argPtr);
 	currCommand->name = calloc(strlen(token) + 1, sizeof(char));
 	strcpy(currCommand->name, token);
 
 	// Build argument array into command struct
-	int argIndex = 0;
-	strcpy(currCommand->arguments[argIndex], currCommand->name);
-	argIndex++;
+	// strcpy(currCommand->arguments[argIndex], currCommand->name);
+	char **nextArg = currCommand->argv;
+	*nextArg++ = token;
+	currCommand->numArgs++;
 
-	char *argument = strtok_r(NULL, " ", &argPtr);
+	char *argument = strtok_r(NULL, " \n", &argPtr);
 	while (argument != NULL)
 	{
 		// TODO is this a > or < or $?????  Do the thing
+		*nextArg++ = argument;
 		currCommand->numArgs++;
-		strcpy(currCommand->arguments[argIndex], argument);
-		argument = strtok_r(NULL, ";", &argPtr);
-		argIndex++;
+		// strcpy(currCommand->arguments[argIndex], argument);
+		argument = strtok_r(NULL, " \n", &argPtr);
 	}
-
+	
 	// Last argument should be null for exec calls
-	// TODO:
-	// currCommand->arguments[argIndex] = NULL;
+	*nextArg = NULL;
+
+	// Is foreground funciton?
+	// TODO
 
 	return currCommand;
 }
@@ -227,7 +231,6 @@ void executeForeground(struct command *toExecute, int *statusCode)
 {
 	int childStatus;
 	char *commName = toExecute->name;
-	char **args = toExecute->arguments;
 
 	// Fork a new process
 	pid_t spawnPid = fork();
@@ -236,24 +239,23 @@ void executeForeground(struct command *toExecute, int *statusCode)
 	{
 	case -1:
 		perror("fork()\n");
-		statusCode = 1;
+		*statusCode = 1;
 		exit(1);
 		break;
 	case 0:
 		// In the child process
 		printf("CHILD(%d) running ls command\n", getpid());
 		// Replace the current program with "/bin/ls"
-		execvp(commName, args);
+		execvp(commName, toExecute->argv);
 		// exec only returns if there is an error
-		statusCode = 1;
-		perror("execve");
+		*statusCode = 1;
+		perror("execvp");
 		exit(2);
 		break;
 	default:
 		// In the parent process
 		// Wait for child's termination
 		spawnPid = waitpid(spawnPid, &childStatus, 0);
-		exit(0);
 		break;
 	}
 }
