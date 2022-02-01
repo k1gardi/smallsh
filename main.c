@@ -7,6 +7,7 @@
 //		The user can choose to load movie data from the largest file in a directory, the smallest file,
 //		or a file with the name of their choosing
 #include <dirent.h>
+#include <err.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 
 #define MAX_LINE_LEN 2048
 #define MAX_NUM_ARGS 512
+#define MAX_BACKGROUND 10
 #define DEFAULT_REDIRECT "/dev/null"
 
 struct command
@@ -28,8 +30,6 @@ struct command
 	int numArgs;
 	char *inDirect;
 	char *outDirect;
-	int processId;
-	int exitStatus;
 	bool isForeground;
 };
 
@@ -37,6 +37,10 @@ struct command
 bool isCommentOrBlank(char *);
 struct command *buildCommand(char *);
 void executeForeground(struct command *, int *);
+void executeBackground(struct command *, int *, int *);
+void checkBackgroundPIDs(int*, int *);
+void printStatus(int);
+void addPIDToArray(int *, int);
 
 /* This program reads movie data from a csv and loads it into a linked list.
 * The user is then given multiple options to filter/display the data
@@ -44,12 +48,17 @@ void executeForeground(struct command *, int *);
 int main(void)
 {
 	char *HOME = getenv("HOME");
-	int statusCode = 0;
+	int lastStatusCode = 0;
 	DIR *currDir = opendir(".");
+	int activeBackgroundPIDs[MAX_BACKGROUND] = {0};
 
 	// Execute main loop, maintaining shell prompting/reading
 	while (true)
 	{
+		// Check background processes for completion
+		checkBackgroundPIDs(activeBackgroundPIDs, &lastStatusCode);
+
+		// Prompt for a new command
 		printf(": ");
 		fflush(stdout);
 		char *buff = NULL;
@@ -57,6 +66,7 @@ int main(void)
 		getline(&buff, &bufflen, stdin);
 
 		// Ignore blank lines and commented lines
+		// TODO: Make work for line full of whitespace.  Should probably buildCommand before this
 		if (isCommentOrBlank(buff))
 		{
 			free(buff);
@@ -128,8 +138,7 @@ int main(void)
 		// The three built-in shell commands do not count as foreground processes for the purposes of this built-in command - i.e., status should ignore built-in commands.
 		if (strncmp(buff, "status", 6) == 0)
 		{
-			printf("Exit value %d\n", statusCode);
-			fflush(stdout);
+			printStatus(lastStatusCode);
 			continue;
 		}
 
@@ -137,7 +146,12 @@ int main(void)
 		// Foreground command
 		if (currCommand->isForeground)
 		{
-			executeForeground(currCommand, &statusCode);
+			executeForeground(currCommand, &lastStatusCode);
+		}
+		// Background command
+		else
+		{
+			executeBackground(currCommand, &lastStatusCode, activeBackgroundPIDs);
 		}
 		// Background command
 
@@ -277,7 +291,7 @@ void freeCommand(struct command *oldCommand)
 	// TODO: Free an old command struct
 }
 
-void executeForeground(struct command *activeCommand, int *statusCode)
+void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
 	char *commName = activeCommand->name;
@@ -289,14 +303,11 @@ void executeForeground(struct command *activeCommand, int *statusCode)
 	{
 	case -1:
 		perror("fork()\n");
-		*statusCode = 1;
+		*lastStatusCode = 1;
 		exit(1);
 		break;
 	case 0:
 		// In the child process
-		// TODO: REMOVE PRINT STATEMENT
-		printf("CHILD(%d) running ls command\n", getpid());
-
 		// Do we need to redirect input?
 		if (activeCommand->inDirect)
 		{
@@ -344,14 +355,131 @@ void executeForeground(struct command *activeCommand, int *statusCode)
 		// In the parent process
 		// Wait for child's termination
 		spawnPid = waitpid(spawnPid, &childStatus, 0);
-		if (WIFEXITED(childStatus))
-		{
-			*statusCode = WEXITSTATUS(childStatus);
-		}
-		else
-		{
-			*statusCode = WTERMSIG(childStatus);
-		}
+		*lastStatusCode = childStatus;
 		break;
 	}
+}
+
+void executeBackground(struct command *activeCommand, int *lastStatusCode, int *backgroundPIDs)
+{
+	int childStatus;
+	char *commName = activeCommand->name;
+
+	// Fork a new process
+	pid_t spawnPid = fork();
+
+	switch (spawnPid)
+	{
+	case -1:
+		perror("fork()\n");
+		*lastStatusCode = 1;
+		exit(1);
+		break;
+	case 0:
+		// In the child process
+		// Do we need to redirect input?
+		if (activeCommand->inDirect)
+		{
+			// Open infile
+			int sourceFD = open(activeCommand->inDirect, O_RDONLY);
+			if (sourceFD == -1)
+			{
+				perror("source open()");
+				exit(1);
+			}
+
+			// Redirect stdin
+			int inCode = dup2(sourceFD, 0);
+			if (inCode == -1)
+			{
+				perror("source dup2()");
+				exit(2);
+			}
+		}
+		// Do we need to redirect output?
+		if (activeCommand->outDirect)
+		{
+			// Open outfile
+			int targetFD = open(activeCommand->outDirect, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if (targetFD == -1)
+			{
+				perror("target open()");
+				exit(1);
+			}
+
+			// Redirect stdout
+			int outCode = dup2(targetFD, 1);
+			if (outCode == -1)
+			{
+				perror("target dup2()");
+				exit(2);
+			}
+		}
+
+		execvp(commName, activeCommand->argv);
+
+		// exec only returns if there is an error
+		perror("execvp");
+		exit(2);
+		break;
+	default:
+		// In the parent process
+		printf("background pid is %d\n", spawnPid);
+		addPIDToArray(backgroundPIDs, spawnPid);
+		spawnPid = waitpid(spawnPid, &childStatus, WNOHANG);
+		*lastStatusCode = childStatus;
+		break;
+	}
+}
+
+void checkBackgroundPIDs(int *backgroundPIDs, int *lastStatusCode)
+{
+	for (int i = 0; i < MAX_BACKGROUND; i++)
+	{
+		if (backgroundPIDs[i])
+		{
+			int childStatus;
+			// Check if process is done
+			if (waitpid(backgroundPIDs[i], &childStatus, WNOHANG) != 0)
+			{
+				// Print completion
+				printf("background pid %d is done: ", backgroundPIDs[i]);
+				printStatus(childStatus);
+				fflush(stdout);
+
+				// TODO: Clean process
+
+				*lastStatusCode = childStatus;
+				// Clear this PID from the array
+				backgroundPIDs[i] = 0;
+			}
+		}
+	}
+}
+
+void printStatus(int statusCode)
+{
+	int readableCode;
+	if (WIFEXITED(statusCode))
+	{
+		readableCode = WEXITSTATUS(statusCode);
+		printf("exit value %d\n", readableCode);
+	}
+	else
+	{
+		readableCode = WTERMSIG(statusCode);
+		printf("terminated by signal %d\n", readableCode);
+	}
+}
+
+void addPIDToArray(int * backgroundPIDs, int pid)
+{
+	for (int i = 0; i < MAX_BACKGROUND; i++)
+	{
+		if (!backgroundPIDs[i])
+		{
+			backgroundPIDs[i] = pid;
+			break;
+		}
+	} 
 }
