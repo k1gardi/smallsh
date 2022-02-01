@@ -18,6 +18,7 @@
 
 #define MAX_LINE_LEN 2048
 #define MAX_NUM_ARGS 512
+#define DEFAULT_REDIRECT "/dev/null"
 
 struct command
 {
@@ -119,6 +120,7 @@ int main(void)
 			if (cdError != 0)
 			{
 				printf("There was an error changing to directory %s\n", newDir);
+				fflush(stdout);
 			}
 			free(buff);
 			continue;
@@ -186,6 +188,8 @@ struct command *buildCommand(char *input)
 {
 	struct command *currCommand = malloc(sizeof(struct command));
 	char *argPtr;
+	bool isInfile = false;
+	bool isOutfile = false;
 
 	currCommand->inDirect = NULL;
 	currCommand->outDirect = NULL;
@@ -197,8 +201,8 @@ struct command *buildCommand(char *input)
 	currCommand->name = calloc(strlen(token) + 1, sizeof(char));
 	strcpy(currCommand->name, token);
 
-	// Build argument array into command struct
-	// strcpy(currCommand->arguments[argIndex], currCommand->name);
+	// ************************************************************************
+	// Parse out remaining arguments
 	char **nextArg = currCommand->argv;
 	*nextArg++ = token;
 	currCommand->numArgs++;
@@ -206,18 +210,68 @@ struct command *buildCommand(char *input)
 	char *argument = strtok_r(NULL, " \n", &argPtr);
 	while (argument != NULL)
 	{
-		// TODO is this a > or < or $?????  Do the thing
+		// Check if we need to redirect stdin or out
+		if (strcmp(argument, "<") == 0)
+		{
+			isInfile = true;
+			argument = strtok_r(NULL, " \n", &argPtr);
+			continue;
+		}
+		if (strcmp(argument, ">") == 0)
+		{
+			isOutfile = true;
+			argument = strtok_r(NULL, " \n", &argPtr);
+			continue;
+		}
+
+		// This argument is an input direction
+		if (isInfile)
+		{
+			isInfile = false;
+			currCommand->inDirect = calloc(strlen(argument) + 1, sizeof(char));
+			strcpy(currCommand->inDirect, argument);
+			argument = strtok_r(NULL, " \n", &argPtr);
+			continue;
+		}
+
+		// This argument is an output direction
+		if (isOutfile)
+		{
+			isOutfile = false;
+			currCommand->outDirect = calloc(strlen(argument) + 1, sizeof(char));
+			strcpy(currCommand->outDirect, argument);
+			argument = strtok_r(NULL, " \n", &argPtr);
+			continue;
+		}
+
+		// TODO: Check if arg needs any expanding
 		*nextArg++ = argument;
 		currCommand->numArgs++;
-		// strcpy(currCommand->arguments[argIndex], argument);
 		argument = strtok_r(NULL, " \n", &argPtr);
 	}
-	
+
 	// Last argument should be null for exec calls
 	*nextArg = NULL;
 
-	// Is foreground funciton?
-	// TODO
+	// ************************************************************************
+	// Is background funciton?
+	if (strcmp(currCommand->argv[currCommand->numArgs - 1], "&") == 0)
+	{
+		currCommand->isForeground = false;
+		currCommand->argv[currCommand->numArgs - 1] = NULL;
+
+		// Make sure std input and output are marked to redirect
+		if (!currCommand->inDirect)
+		{
+			currCommand->inDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
+			strcpy(currCommand->inDirect, DEFAULT_REDIRECT);
+		}
+		if (!currCommand->outDirect)
+		{
+			currCommand->outDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
+			strcpy(currCommand->outDirect, DEFAULT_REDIRECT);
+		}
+	}
 
 	return currCommand;
 }
