@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <err.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,7 @@ bool isCommentOrBlank(char *);
 struct command *buildCommand(char *);
 void executeForeground(struct command *, int *);
 void executeBackground(struct command *, int *, int *);
-void checkBackgroundPIDs(int*, int *);
+void checkBackgroundPIDs(int *, int *);
 void printStatus(int);
 void addPIDToArray(int *, int);
 
@@ -51,6 +52,11 @@ int main(void)
 	int lastStatusCode = 0;
 	DIR *currDir = opendir(".");
 	int activeBackgroundPIDs[MAX_BACKGROUND] = {0};
+
+	// Set up SIGINT ignore handler
+	struct sigaction ignoreAction = {0};
+	ignoreAction.sa_handler = SIG_IGN;
+	sigaction(SIGINT, &ignoreAction, NULL);
 
 	// Execute main loop, maintaining shell prompting/reading
 	while (true)
@@ -295,7 +301,7 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
 	char *commName = activeCommand->name;
-
+	struct sigaction obeySIGINT = {0};
 	// Fork a new process
 	pid_t spawnPid = fork();
 
@@ -308,6 +314,10 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 		break;
 	case 0:
 		// In the child process
+		// Set up signal handler
+		obeySIGINT.sa_handler = SIG_DFL;
+		sigaction(SIGINT, &obeySIGINT, NULL);
+
 		// Do we need to redirect input?
 		if (activeCommand->inDirect)
 		{
@@ -355,6 +365,13 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 		// In the parent process
 		// Wait for child's termination
 		spawnPid = waitpid(spawnPid, &childStatus, 0);
+
+		// Was this a signal termination??
+		if (WIFSIGNALED(childStatus))
+		{
+			int readableCode = WTERMSIG(childStatus);
+			printf("terminated by signal %d\n", readableCode);
+		}
 		*lastStatusCode = childStatus;
 		break;
 	}
@@ -472,7 +489,7 @@ void printStatus(int statusCode)
 	}
 }
 
-void addPIDToArray(int * backgroundPIDs, int pid)
+void addPIDToArray(int *backgroundPIDs, int pid)
 {
 	for (int i = 0; i < MAX_BACKGROUND; i++)
 	{
@@ -481,5 +498,5 @@ void addPIDToArray(int * backgroundPIDs, int pid)
 			backgroundPIDs[i] = pid;
 			break;
 		}
-	} 
+	}
 }
