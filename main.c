@@ -36,12 +36,13 @@ struct command
 
 // Function prototypes
 bool isCommentOrBlank(char *);
-struct command *buildCommand(char *);
+struct command *buildCommand(char *, bool);
 void executeForeground(struct command *, int *);
 void executeBackground(struct command *, int *, int *);
 void checkBackgroundPIDs(int *, int *);
 void printStatus(int);
 void addPIDToArray(int *, int);
+void handle_SIGTSTP(int);
 
 /* This program reads movie data from a csv and loads it into a linked list.
 * The user is then given multiple options to filter/display the data
@@ -58,6 +59,14 @@ int main(void)
 	ignoreAction.sa_handler = SIG_IGN;
 	sigaction(SIGINT, &ignoreAction, NULL);
 
+	struct sigaction handle_SIGTSTP_action = {0};
+	handle_SIGTSTP_action.sa_handler = handle_SIGTSTP;
+	sigfillset(&handle_SIGTSTP_action.sa_mask);
+	handle_SIGTSTP_action.sa_flags = SA_RESTART;
+	sigaction(SIGTSTP, &handle_SIGTSTP_action, NULL);
+
+	bool foregroundMode = false;
+
 	// Execute main loop, maintaining shell prompting/reading
 	while (true)
 	{
@@ -71,28 +80,30 @@ int main(void)
 		size_t bufflen;
 		getline(&buff, &bufflen, stdin);
 
+		// Parse input and build command structure
+		struct command *currCommand = buildCommand(buff, foregroundMode);
+		free(buff);
+
 		// Ignore blank lines and commented lines
 		// TODO: Make work for line full of whitespace.  Should probably buildCommand before this
-		if (isCommentOrBlank(buff))
+		if (isCommentOrBlank(currCommand->name))
 		{
-			free(buff);
 			printf("line was blank or comment\n");
 			fflush(stdout);
 			continue;
 		}
 		// ******************** Built-in Commands ********************
 		// Handle exit command
-		if (strncmp(buff, "exit", 4) == 0)
+		if (strcmp(currCommand->name, "exit") == 0)
 		{
 			// TODO: Go through my array of child PIDs, kill them if they're running,
 			// and then reach the return EXIT_SUCCESS?
-			free(buff);
 			closedir(currDir);
 			break;
 		}
 
 		// Handle pwd
-		if (strncmp(buff, "pwd", 3) == 0)
+		if (strcmp(currCommand->name, "pwd") == 0)
 		{
 			char currDirName[256];
 			// TODO: REMOVE?? -> ????? char *test = getcwd(currDirName, 256);
@@ -100,16 +111,11 @@ int main(void)
 
 			printf("%s\n", currDirName);
 			fflush(stdout);
-			free(buff);
 			continue;
 		}
 
-		struct command *currCommand = buildCommand(buff);
-
 		// Handle cd
-		// no args -> go to dir specified in HOME env var
-		// Takes path as second arg.  Must support absolute and relative path
-		if (strncmp(buff, "cd", 2) == 0)
+		if (strcmp(currCommand->name, "cd") == 0)
 		{
 			int cdError = 0;
 			char *newDir = NULL;
@@ -134,7 +140,6 @@ int main(void)
 				printf("There was an error changing to directory %s\n", newDir);
 				fflush(stdout);
 			}
-			free(buff);
 			continue;
 		}
 
@@ -187,6 +192,10 @@ int main(void)
 
 bool isCommentOrBlank(char *line)
 {
+	if (line == NULL)
+	{
+		return true;
+	}
 	if (strlen(line) == 0)
 	{
 		return true;
@@ -200,7 +209,7 @@ bool isCommentOrBlank(char *line)
 	return false;
 }
 
-struct command *buildCommand(char *input)
+struct command *buildCommand(char *input, bool foregroundMode)
 {
 	struct command *currCommand = malloc(sizeof(struct command));
 	char *argPtr;
@@ -214,6 +223,11 @@ struct command *buildCommand(char *input)
 
 	// Get command name
 	char *token = strtok_r(input, " \n", &argPtr);
+	// Handle empty command
+	if (token == NULL)
+	{
+		return currCommand;
+	}
 	currCommand->name = calloc(strlen(token) + 1, sizeof(char));
 	strcpy(currCommand->name, token);
 
@@ -273,19 +287,23 @@ struct command *buildCommand(char *input)
 	// Is background funciton?
 	if (strcmp(currCommand->argv[currCommand->numArgs - 1], "&") == 0)
 	{
-		currCommand->isForeground = false;
 		currCommand->argv[currCommand->numArgs - 1] = NULL;
+		// If we are in foreground only mode, do not set this as a background command
+		if (!foregroundMode)
+		{
+			currCommand->isForeground = false;
 
-		// Make sure std input and output are marked to redirect
-		if (!currCommand->inDirect)
-		{
-			currCommand->inDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
-			strcpy(currCommand->inDirect, DEFAULT_REDIRECT);
-		}
-		if (!currCommand->outDirect)
-		{
-			currCommand->outDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
-			strcpy(currCommand->outDirect, DEFAULT_REDIRECT);
+			// Make sure std input and output are marked to redirect
+			if (!currCommand->inDirect)
+			{
+				currCommand->inDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
+				strcpy(currCommand->inDirect, DEFAULT_REDIRECT);
+			}
+			if (!currCommand->outDirect)
+			{
+				currCommand->outDirect = calloc(strlen(DEFAULT_REDIRECT) + 1, sizeof(char));
+				strcpy(currCommand->outDirect, DEFAULT_REDIRECT);
+			}
 		}
 	}
 
@@ -301,7 +319,7 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
 	char *commName = activeCommand->name;
-	struct sigaction obeySIGINT = {0};
+	struct sigaction obeyAction = {0};
 	// Fork a new process
 	pid_t spawnPid = fork();
 
@@ -315,8 +333,8 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 	case 0:
 		// In the child process
 		// Set up signal handler
-		obeySIGINT.sa_handler = SIG_DFL;
-		sigaction(SIGINT, &obeySIGINT, NULL);
+		obeyAction.sa_handler = SIG_DFL;
+		sigaction(SIGINT, &obeyAction, NULL);
 
 		// Do we need to redirect input?
 		if (activeCommand->inDirect)
@@ -499,4 +517,11 @@ void addPIDToArray(int *backgroundPIDs, int pid)
 			break;
 		}
 	}
+}
+
+void handle_SIGTSTP(int signo)
+{
+	char *message = "\nEntering foreground-only mode (& is now ignored)\n";
+	// We are using write rather than printf
+	write(STDOUT_FILENO, message, 50);
 }
