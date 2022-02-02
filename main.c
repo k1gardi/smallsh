@@ -8,6 +8,7 @@
 //		or a file with the name of their choosing
 #include <dirent.h>
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -34,9 +35,11 @@ struct command
 	bool isForeground;
 };
 
+volatile sig_atomic_t foregroundMode = 0;
+
 // Function prototypes
 bool isCommentOrBlank(char *);
-struct command *buildCommand(char *, bool);
+struct command *buildCommand(char *);
 void executeForeground(struct command *, int *);
 void executeBackground(struct command *, int *, int *);
 void checkBackgroundPIDs(int *, int *);
@@ -62,10 +65,10 @@ int main(void)
 	struct sigaction handle_SIGTSTP_action = {0};
 	handle_SIGTSTP_action.sa_handler = handle_SIGTSTP;
 	sigfillset(&handle_SIGTSTP_action.sa_mask);
-	handle_SIGTSTP_action.sa_flags = SA_RESTART;
+	handle_SIGTSTP_action.sa_flags = 0;
 	sigaction(SIGTSTP, &handle_SIGTSTP_action, NULL);
 
-	bool foregroundMode = false;
+	// static bool foregroundMode = false;
 
 	// Execute main loop, maintaining shell prompting/reading
 	while (true)
@@ -78,18 +81,21 @@ int main(void)
 		fflush(stdout);
 		char *buff = NULL;
 		size_t bufflen;
-		getline(&buff, &bufflen, stdin);
+		int numChars = getline(&buff, &bufflen, stdin);
 
+		// Did SIGTSTP interrupt getline?
+		if (numChars == -1)
+		{
+			clearerr(stdin); // reset stdin status
+		}
 		// Parse input and build command structure
-		struct command *currCommand = buildCommand(buff, foregroundMode);
-		free(buff);
+		struct command *currCommand = buildCommand(buff);
 
 		// Ignore blank lines and commented lines
-		// TODO: Make work for line full of whitespace.  Should probably buildCommand before this
 		if (isCommentOrBlank(currCommand->name))
 		{
-			printf("line was blank or comment\n");
 			fflush(stdout);
+			free(buff);
 			continue;
 		}
 		// ******************** Built-in Commands ********************
@@ -98,7 +104,9 @@ int main(void)
 		{
 			// TODO: Go through my array of child PIDs, kill them if they're running,
 			// and then reach the return EXIT_SUCCESS?
+			// killBackgroundPIDs(activeBackgroundPIDs);
 			closedir(currDir);
+			free(buff);
 			break;
 		}
 
@@ -111,6 +119,7 @@ int main(void)
 
 			printf("%s\n", currDirName);
 			fflush(stdout);
+			free(buff);
 			continue;
 		}
 
@@ -140,14 +149,12 @@ int main(void)
 				printf("There was an error changing to directory %s\n", newDir);
 				fflush(stdout);
 			}
+			free(buff);
 			continue;
 		}
 
 		// Handle status
-		// prints either exit status or terminating signal of last foreground process ran by shell
-		// If this command is run before any foreground command is run, then it should simply return the exit status 0.
-		// The three built-in shell commands do not count as foreground processes for the purposes of this built-in command - i.e., status should ignore built-in commands.
-		if (strncmp(buff, "status", 6) == 0)
+		if (strcmp(currCommand->name, "status") == 0)
 		{
 			printStatus(lastStatusCode);
 			continue;
@@ -164,19 +171,8 @@ int main(void)
 		{
 			executeBackground(currCommand, &lastStatusCode, activeBackgroundPIDs);
 		}
-		// Background command
 
-		// **********************************************************
-		// Non-native commands
-		// Fork a child
-		// Run command with exec
-		// should allow shell scripts to be executed
-		// if no command found in PATH print error message ant exit(1)
-		// Child must terminate after command (for success and fail)
-
-		// ************************************************************
-		// 6. Input & Output Redirection
-		// 7. Executing Commands in Foreground & Background
+		free(buff);
 	}
 
 	return 0;
@@ -209,10 +205,17 @@ bool isCommentOrBlank(char *line)
 	return false;
 }
 
-struct command *buildCommand(char *input, bool foregroundMode)
+struct command *buildCommand(char *input)
 {
 	struct command *currCommand = malloc(sizeof(struct command));
 	char *argPtr;
+
+	// Get PID string
+	pid_t raw_PID = getpid();
+	int length = snprintf(NULL, 0, "%d", raw_PID);
+	char *PID = calloc(length + 1, sizeof(char));
+	sprintf(PID, "%d", raw_PID);
+
 	bool isInfile = false;
 	bool isOutfile = false;
 
@@ -274,8 +277,24 @@ struct command *buildCommand(char *input, bool foregroundMode)
 			continue;
 		}
 
-		// TODO: Check if arg needs any expanding
-		*nextArg++ = argument;
+		// Check if arg needs any expanding
+		char *arg = calloc(256, sizeof(char));
+		for (int i = 0; i < strlen(argument); i++)
+		{
+			// Do we need to expand here?
+			if (i < strlen(argument) - 1 && strncmp(&argument[i], "$$", 2) == 0)
+			{
+				strcat(arg, PID);
+				i++;
+			}
+			// Don't expand, just copy next char
+			else
+			{
+				strncat(arg, &argument[i], 1);
+			}
+		}
+
+		*nextArg++ = arg;
 		currCommand->numArgs++;
 		argument = strtok_r(NULL, " \n", &argPtr);
 	}
@@ -307,6 +326,7 @@ struct command *buildCommand(char *input, bool foregroundMode)
 		}
 	}
 
+	free(PID);
 	return currCommand;
 }
 
@@ -320,6 +340,8 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 	int childStatus;
 	char *commName = activeCommand->name;
 	struct sigaction obeyAction = {0};
+	struct sigaction ignoreAction = {0};
+
 	// Fork a new process
 	pid_t spawnPid = fork();
 
@@ -335,6 +357,8 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 		// Set up signal handler
 		obeyAction.sa_handler = SIG_DFL;
 		sigaction(SIGINT, &obeyAction, NULL);
+		ignoreAction.sa_handler = SIG_IGN;
+		sigaction(SIGTSTP, &ignoreAction, NULL);
 
 		// Do we need to redirect input?
 		if (activeCommand->inDirect)
@@ -521,7 +545,21 @@ void addPIDToArray(int *backgroundPIDs, int pid)
 
 void handle_SIGTSTP(int signo)
 {
-	char *message = "\nEntering foreground-only mode (& is now ignored)\n";
-	// We are using write rather than printf
-	write(STDOUT_FILENO, message, 50);
+	if (foregroundMode)
+	{
+		char *message = "\nExiting foreground-only mode\n";
+		write(STDOUT_FILENO, message, 30);
+		foregroundMode = 0;
+	}
+	else
+	{
+		char *message = "\nEntering foreground-only mode (& is now ignored)\n";
+		write(STDOUT_FILENO, message, 50);
+		foregroundMode = 1;
+	}
+}
+
+void killBackgroundPIDs(int *backgroundPIDs)
+{
+	// TODO:
 }
