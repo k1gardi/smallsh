@@ -1,11 +1,17 @@
 // Author: Kaewan Gardi
 // Course: CS344
-// Date: 01/24/2022
-// This program reads movie data from a csv and loads it into a sorted linked list.
-// 		Then saves the movie titles into a new directory in .txt files organized and named
-//		by release year.
-//		The user can choose to load movie data from the largest file in a directory, the smallest file,
-//		or a file with the name of their choosing
+// Date: 02/02/2022
+// Assignment 3: smallsh
+// This program is a small C shell.  It meets the following requirements:
+//	Provide a prompt for running commands
+//	Handle blank lines and comments, which are lines beginning with the # character
+//	Provide expansion for the variable $$
+//	Execute 3 commands exit, cd, and status via code built into the shell
+//	Execute other commands by creating new processes using a function from the exec family of functions
+//	Support input and output redirection
+//	Support running commands in foreground and background processes
+//	Implement custom handlers for 2 signals, SIGINT and SIGTSTP
+
 #define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
 #include <err.h>
@@ -36,7 +42,7 @@ struct command
 	bool isForeground;
 };
 
-volatile sig_atomic_t foregroundMode = 0;
+volatile sig_atomic_t foregroundMode = 0; // Tracks foreground only mode
 
 // Function prototypes
 bool isCommentOrBlank(char *);
@@ -51,9 +57,7 @@ void addPIDToArray(int *, int);
 void handle_SIGTSTP_FG_on(int);
 void handle_SIGTSTP_FG_off(int);
 
-/* This program reads movie data from a csv and loads it into a linked list.
-* The user is then given multiple options to filter/display the data
-*/
+// ########################################## BEGIN MAIN FUNCITON ######################################################################
 int main(void)
 {
 	char *HOME = getenv("HOME");
@@ -184,12 +188,7 @@ int main(void)
 
 // ########################################## END OF MAIN FUNCITON ######################################################################
 
-/* Inserts a movie node into the LL in its correct sorted position.
-***		Source Citation:
-*				Code adapted from https://www.techiedelight.com/given-linked-list-change-sorted-order/ function "sortedInsert"
-*				On date: 01/08/2022
-*/
-
+/* Returns whether the given line is blank or a comment */
 bool isCommentOrBlank(char *line)
 {
 	if (line == NULL)
@@ -209,6 +208,13 @@ bool isCommentOrBlank(char *line)
 	return false;
 }
 
+/* Returns a command structure holding data from the given line.
+*	strtok is used to parse user input and build the command struct
+*	This is where final data will be determined as saved for the following:
+*	Command name (function), NULL terminated args, outfile for redirection (if any),
+*	infile for redirection (if any), and whether the command should be ran in the
+*	foreground or background.
+*/
 struct command *buildCommand(char *input)
 {
 	struct command *currCommand = malloc(sizeof(struct command));
@@ -223,11 +229,13 @@ struct command *buildCommand(char *input)
 	bool isInfile = false;
 	bool isOutfile = false;
 
+	// Set initial vals
 	currCommand->inDirect = NULL;
 	currCommand->outDirect = NULL;
 	currCommand->numArgs = 0;
 	currCommand->isForeground = true;
 
+	// ************************************************************************
 	// Get command name
 	char *token = strtok_r(input, " \n", &argPtr);
 	// Handle empty command
@@ -235,6 +243,7 @@ struct command *buildCommand(char *input)
 	{
 		return currCommand;
 	}
+
 	currCommand->name = calloc(strlen(token) + 1, sizeof(char));
 	strcpy(currCommand->name, token);
 
@@ -303,7 +312,7 @@ struct command *buildCommand(char *input)
 		argument = strtok_r(NULL, " \n", &argPtr);
 	}
 
-	// Last argument should be null for exec calls
+	// Last argument should be null for exec calls to work
 	*nextArg = NULL;
 
 	// ************************************************************************
@@ -334,6 +343,7 @@ struct command *buildCommand(char *input)
 	return currCommand;
 }
 
+/* Runs the provided command in the foreground */
 void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
@@ -415,6 +425,7 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 	}
 }
 
+/* Runs the provided command in the background and updates backgroundPIDs array */
 void executeBackground(struct command *activeCommand, int *lastStatusCode, int *backgroundPIDs)
 {
 	int childStatus;
@@ -487,6 +498,9 @@ void executeBackground(struct command *activeCommand, int *lastStatusCode, int *
 	}
 }
 
+/* Checks backgroundPIDs array for any processes that have been completed since we last checked.
+*	Updates last status code if appropriate.
+*/
 void checkBackgroundPIDs(int *backgroundPIDs, int *lastStatusCode)
 {
 	for (int i = 0; i < MAX_BACKGROUND; i++)
@@ -510,6 +524,7 @@ void checkBackgroundPIDs(int *backgroundPIDs, int *lastStatusCode)
 	}
 }
 
+/* Prints information for the given statusCode*/
 void printStatus(int statusCode)
 {
 	int readableCode;
@@ -525,6 +540,7 @@ void printStatus(int statusCode)
 	}
 }
 
+/* Adds a child process PID to the array of current child PIDs */
 void addPIDToArray(int *backgroundPIDs, int pid)
 {
 	for (int i = 0; i < MAX_BACKGROUND; i++)
@@ -537,6 +553,9 @@ void addPIDToArray(int *backgroundPIDs, int pid)
 	}
 }
 
+/* SIGTSTP handler function used when foreground mode is on.
+*	Turns foreground mode off when triggered.
+*/
 void handle_SIGTSTP_FG_on(int sig)
 {
 	foregroundMode = 0;
@@ -545,6 +564,9 @@ void handle_SIGTSTP_FG_on(int sig)
 	signal(SIGTSTP, &handle_SIGTSTP_FG_off);
 }
 
+/* SIGTSTP handler function used when foreground mode is off.
+*	Turns foreground mode on when triggered.
+*/
 void handle_SIGTSTP_FG_off(int sig)
 {
 	foregroundMode = 1;
@@ -553,8 +575,12 @@ void handle_SIGTSTP_FG_off(int sig)
 	signal(SIGTSTP, &handle_SIGTSTP_FG_on);
 }
 
+/* Kills all outstanding child background processes.
+*	This is in preperation for the main shell's exit.
+*/
 void killBackgroundPIDs(int *backgroundPIDs)
 {
+	// Iterate over background PIDs
 	for (int i = 0; i < MAX_BACKGROUND; i++)
 	{
 		if (backgroundPIDs[i])
