@@ -6,6 +6,7 @@
 //		by release year.
 //		The user can choose to load movie data from the largest file in a directory, the smallest file,
 //		or a file with the name of their choosing
+#define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
@@ -22,7 +23,7 @@
 
 #define MAX_LINE_LEN 2048
 #define MAX_NUM_ARGS 512
-#define MAX_BACKGROUND 10
+#define MAX_BACKGROUND 200
 #define DEFAULT_REDIRECT "/dev/null"
 
 struct command
@@ -40,12 +41,15 @@ volatile sig_atomic_t foregroundMode = 0;
 // Function prototypes
 bool isCommentOrBlank(char *);
 struct command *buildCommand(char *);
+void freeCommand(struct command *);
 void executeForeground(struct command *, int *);
 void executeBackground(struct command *, int *, int *);
 void checkBackgroundPIDs(int *, int *);
+void killBackgroundPIDs(int *);
 void printStatus(int);
 void addPIDToArray(int *, int);
-void handle_SIGTSTP(int);
+void handle_SIGTSTP_FG_on(int);
+void handle_SIGTSTP_FG_off(int);
 
 /* This program reads movie data from a csv and loads it into a linked list.
 * The user is then given multiple options to filter/display the data
@@ -62,13 +66,12 @@ int main(void)
 	ignoreAction.sa_handler = SIG_IGN;
 	sigaction(SIGINT, &ignoreAction, NULL);
 
-	struct sigaction handle_SIGTSTP_action = {0};
-	handle_SIGTSTP_action.sa_handler = handle_SIGTSTP;
-	sigfillset(&handle_SIGTSTP_action.sa_mask);
-	handle_SIGTSTP_action.sa_flags = 0;
-	sigaction(SIGTSTP, &handle_SIGTSTP_action, NULL);
-
-	// static bool foregroundMode = false;
+	signal(SIGTSTP, &handle_SIGTSTP_FG_off);
+	int foregroundMode_save = foregroundMode;
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGTSTP);
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 
 	// Execute main loop, maintaining shell prompting/reading
 	while (true)
@@ -88,6 +91,14 @@ int main(void)
 		{
 			clearerr(stdin); // reset stdin status
 		}
+
+		// Handle SIGTSTP Switch **************************************
+		if (foregroundMode_save != foregroundMode)
+		{
+			foregroundMode_save = foregroundMode;
+		}
+
+		// ***********************************************************
 		// Parse input and build command structure
 		struct command *currCommand = buildCommand(buff);
 
@@ -102,19 +113,16 @@ int main(void)
 		// Handle exit command
 		if (strcmp(currCommand->name, "exit") == 0)
 		{
-			// TODO: Go through my array of child PIDs, kill them if they're running,
-			// and then reach the return EXIT_SUCCESS?
-			// killBackgroundPIDs(activeBackgroundPIDs);
+			killBackgroundPIDs(activeBackgroundPIDs);
 			closedir(currDir);
 			free(buff);
-			break;
+			exit(EXIT_SUCCESS);
 		}
 
 		// Handle pwd
 		if (strcmp(currCommand->name, "pwd") == 0)
 		{
 			char currDirName[256];
-			// TODO: REMOVE?? -> ????? char *test = getcwd(currDirName, 256);
 			getcwd(currDirName, 256);
 
 			printf("%s\n", currDirName);
@@ -131,15 +139,11 @@ int main(void)
 			if (currCommand->numArgs == 1)
 			{
 				newDir = HOME;
-				printf("changing dir to %s\n", newDir);
-				fflush(stdout);
 				cdError = chdir(newDir);
 			}
 			else
 			{
 				newDir = currCommand->argv[1];
-				printf("changing dir to %s\n", newDir);
-				fflush(stdout);
 				cdError = chdir(newDir);
 			}
 
@@ -237,7 +241,7 @@ struct command *buildCommand(char *input)
 	// ************************************************************************
 	// Parse out remaining arguments
 	char **nextArg = currCommand->argv;
-	*nextArg++ = token;
+	*nextArg++ = currCommand->name;
 	currCommand->numArgs++;
 
 	char *argument = strtok_r(NULL, " \n", &argPtr);
@@ -330,17 +334,11 @@ struct command *buildCommand(char *input)
 	return currCommand;
 }
 
-void freeCommand(struct command *oldCommand)
-{
-	// TODO: Free an old command struct
-}
-
 void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
 	char *commName = activeCommand->name;
 	struct sigaction obeyAction = {0};
-	struct sigaction ignoreAction = {0};
 
 	// Fork a new process
 	pid_t spawnPid = fork();
@@ -357,8 +355,6 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 		// Set up signal handler
 		obeyAction.sa_handler = SIG_DFL;
 		sigaction(SIGINT, &obeyAction, NULL);
-		ignoreAction.sa_handler = SIG_IGN;
-		sigaction(SIGTSTP, &ignoreAction, NULL);
 
 		// Do we need to redirect input?
 		if (activeCommand->inDirect)
@@ -506,8 +502,6 @@ void checkBackgroundPIDs(int *backgroundPIDs, int *lastStatusCode)
 				printStatus(childStatus);
 				fflush(stdout);
 
-				// TODO: Clean process
-
 				*lastStatusCode = childStatus;
 				// Clear this PID from the array
 				backgroundPIDs[i] = 0;
@@ -543,23 +537,43 @@ void addPIDToArray(int *backgroundPIDs, int pid)
 	}
 }
 
-void handle_SIGTSTP(int signo)
+void handle_SIGTSTP_FG_on(int sig)
 {
-	if (foregroundMode)
-	{
-		char *message = "\nExiting foreground-only mode\n";
-		write(STDOUT_FILENO, message, 30);
-		foregroundMode = 0;
-	}
-	else
-	{
-		char *message = "\nEntering foreground-only mode (& is now ignored)\n";
-		write(STDOUT_FILENO, message, 50);
-		foregroundMode = 1;
-	}
+	foregroundMode = 0;
+	char *message = "Exiting foreground-only mode\n";
+	write(STDOUT_FILENO, message, 29);
+	signal(SIGTSTP, &handle_SIGTSTP_FG_off);
+}
+
+void handle_SIGTSTP_FG_off(int sig)
+{
+	foregroundMode = 1;
+	char *message = "Entering foreground-only mode (& is now ignored)\n";
+	write(STDOUT_FILENO, message, 49);
+	signal(SIGTSTP, &handle_SIGTSTP_FG_on);
 }
 
 void killBackgroundPIDs(int *backgroundPIDs)
 {
-	// TODO:
+	for (int i = 0; i < MAX_BACKGROUND; i++)
+	{
+		if (backgroundPIDs[i])
+		{
+			int childStatus;
+			// Check if process is already done
+			if (waitpid(backgroundPIDs[i], &childStatus, WNOHANG) != 0)
+			{
+				backgroundPIDs[i] = 0;
+			}
+			else
+			{
+				int ret = kill(backgroundPIDs[i], SIGKILL);
+				if (ret == -1)
+				{
+					perror("kill");
+					exit(EXIT_FAILURE);
+				}
+			}
+		}
+	}
 }
