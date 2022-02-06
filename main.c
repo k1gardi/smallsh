@@ -12,7 +12,7 @@
 //	Support running commands in foreground and background processes
 //	Implement custom handlers for 2 signals, SIGINT and SIGTSTP
 
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
@@ -66,7 +66,7 @@ int main(void)
 	int activeBackgroundPIDs[MAX_BACKGROUND] = {0};
 
 	// Set up SIGINT ignore handler
-	struct sigaction ignoreAction = {0};
+	struct sigaction ignoreAction = {{0}};
 	ignoreAction.sa_handler = SIG_IGN;
 	sigaction(SIGINT, &ignoreAction, NULL);
 
@@ -348,7 +348,7 @@ void executeForeground(struct command *activeCommand, int *lastStatusCode)
 {
 	int childStatus;
 	char *commName = activeCommand->name;
-	struct sigaction obeyAction = {0};
+	struct sigaction obeyAction = {{0}};
 
 	// Fork a new process
 	pid_t spawnPid = fork();
